@@ -1,7 +1,7 @@
--- ╔══════════════════════════════════════════════╗
--- ║   BUNNI_R  ·  Matsune PVP  ·  v2.0          ║
--- ║   Black-Purple Glass · Futuristic UI         ║
--- ╚══════════════════════════════════════════════╝
+-- ╔══════════════════════════════════════════════════════╗
+-- ║   BUNNI_R  ·  Matsune PVP  ·  v3.0                  ║
+-- ║   Black-Purple Glass  ·  Futuristic  ·  Lightweight  ║
+-- ╚══════════════════════════════════════════════════════╝
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
@@ -9,88 +9,154 @@ local UserInputService  = game:GetService("UserInputService")
 local TweenService      = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualInput      = game:GetService("VirtualInputManager")
-local CollectionService = game:GetService("CollectionService")
+local StarterGui        = game:GetService("StarterGui")
 local Lighting          = game:GetService("Lighting")
+local HttpService       = game:GetService("HttpService")
 
 local LP  = Players.LocalPlayer
 local Cam = workspace.CurrentCamera
 local ESPTag = math.random(1, 999999)
 
 -- ════════════════════════════════════════════════════════
---  SETTINGS  (all configurable from UI)
+--  CONFIG
 -- ════════════════════════════════════════════════════════
 local CFG = {
-    -- toggles
+    -- Toggles
     AimbotGun       = false,
     AimbotSkill     = false,
-    AutoTarget      = false,
+    SilentAim       = false,
+    CamLock         = false,
+    FastAttack      = false,
     ESPPlayer       = false,
     WalkWater       = false,
+    NoClip          = false,
+    SpeedHack       = false,
     SafeMode        = false,
-    FastAttack      = false,
-    CamLock         = false,
-    SilentAim       = false,
+    AutoHaki        = false,
     AutoV3          = false,
     AutoV4          = false,
     HighPerf        = false,
-    SpeedHack       = false,
-    AutoHaki        = false,
 
-    -- values
+    -- Values
     JumpPower       = 120,
-    WalkSpeed       = 60,
+    WalkSpeed       = 80,
     ESPRange        = 500,
     FastAtkDelay    = 0,
-    SafeHPThresh    = 30,   -- % health
-    AimbotTarget    = "HRP",  -- "HRP" or "Head"
+    SafeHPThresh    = 30,
+    AimbotTarget    = "HRP",   -- "HRP" | "Head"
+    TargetMode      = "Nearest Enemy",  -- "Nearest Enemy" | "Specific Player"
+    SpecificPlayer  = nil,
 }
 
 local SelectWeaponGun = ""
-local OrigWalkSpeed   = 16
+
+-- ════════════════════════════════════════════════════════
+--  GUI PARENT (CoreGui safe)
+-- ════════════════════════════════════════════════════════
+local function GetGuiParent()
+    local ok, cg = pcall(function() return game:GetService("CoreGui") end)
+    return ok and cg or LP:WaitForChild("PlayerGui")
+end
 
 -- ════════════════════════════════════════════════════════
 --  HELPERS
 -- ════════════════════════════════════════════════════════
 local function M(s) return math.floor(s * 0.28) end
 
-local function GetTarget()
-    local best, bestD = nil, math.huge
+-- Check safe-zone / force-field (from QuixHub)
+local function InSafeZone()
+    local pg = LP:FindFirstChild("PlayerGui")
+    if pg then
+        local main = pg:FindFirstChild("Main")
+        if main then
+            local sz = main:FindFirstChild("SafeZone")
+            if sz and sz.Visible then return true end
+        end
+    end
+    if LP.Character and LP.Character:FindFirstChildOfClass("ForceField") then return true end
+    return false
+end
+
+-- Validate player as valid target (team-check from QuixHub)
+local function IsValidTarget(p)
+    if not p or not p.Character then return false end
+    local hum = p.Character:FindFirstChild("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+    if InSafeZone() then return false end
+    if p.Character:FindFirstChildOfClass("ForceField") then return false end
+    -- same-team marines friendly fire protection
+    if LP.Team and p.Team then
+        if tostring(LP.Team) == "Marines" and tostring(p.Team) == "Marines" then
+            return false
+        end
+    end
+    return true
+end
+
+-- Get nearest valid target (QuixHub logic, with ESPRange cap)
+local function GetNearest()
+    if InSafeZone() then return nil end
     local myChar = LP.Character
-    if not myChar or not myChar:FindFirstChild("HumanoidRootPart") then return nil end
-    local myPos = myChar.HumanoidRootPart.Position
+    local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return nil end
+
+    if CFG.TargetMode == "Specific Player" and CFG.SpecificPlayer then
+        local p = Players:FindFirstChild(CFG.SpecificPlayer)
+        if p and IsValidTarget(p) and p.Character:FindFirstChild("HumanoidRootPart") then
+            return p.Character.HumanoidRootPart
+        end
+        return nil
+    end
+
+    local bestDist, bestHRP = math.huge, nil
     for _, v in ipairs(Players:GetPlayers()) do
-        if v ~= LP and v.Character then
+        if v ~= LP and IsValidTarget(v) then
             local hrp = v.Character:FindFirstChild("HumanoidRootPart")
-            local hum = v.Character:FindFirstChild("Humanoid")
-            if hrp and hum and hum.Health > 0 then
-                local d = (hrp.Position - myPos).Magnitude
-                if d < bestD and d <= CFG.ESPRange then
-                    bestD = d; best = v
+            if hrp then
+                local d = (hrp.Position - myHRP.Position).Magnitude
+                if d < bestDist and d <= CFG.ESPRange then
+                    bestDist = d
+                    bestHRP  = hrp
                 end
+            end
+        end
+    end
+    return bestHRP
+end
+
+-- Get nearest character (for safe-mode / bring checks, from QuixHub's u83)
+local function GetNearestChar(range)
+    local myChar = LP.Character
+    local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return nil end
+    local best, bestD = nil, range or 600
+    for _, v in ipairs(Players:GetPlayers()) do
+        if v ~= LP and IsValidTarget(v) then
+            local hrp = v.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local d = (hrp.Position - myHRP.Position).Magnitude
+                if d < bestD then bestD = d; best = v.Character end
             end
         end
     end
     return best
 end
 
-local function GetAimPos(v)
-    if not v or not v.Character then return nil end
+local function GetAimPos(hrp)
+    if not hrp then return nil end
     if CFG.AimbotTarget == "Head" then
-        local h = v.Character:FindFirstChild("Head")
-        return h and h.Position or nil
-    else
-        local hrp = v.Character:FindFirstChild("HumanoidRootPart")
-        return hrp and hrp.Position or nil
+        local head = hrp.Parent and hrp.Parent:FindFirstChild("Head")
+        return head and head.Position or hrp.Position
     end
+    return hrp.Position
 end
 
-local function GetAimPart(v)
-    if not v or not v.Character then return nil end
+local function GetAimPart(hrp)
+    if not hrp then return nil end
     if CFG.AimbotTarget == "Head" then
-        return v.Character:FindFirstChild("Head")
-    else
-        return v.Character:FindFirstChild("HumanoidRootPart")
+        return hrp.Parent and hrp.Parent:FindFirstChild("Head") or hrp
     end
+    return hrp
 end
 
 local function GetLevel(p)
@@ -100,10 +166,16 @@ end
 
 local function TeamColor(p)
     local ok, t = pcall(function() return tostring(p.Team) end)
-    if not ok then return Color3.fromRGB(200,200,200) end
-    if t:lower():find("marine") then return Color3.fromRGB(90,180,255) end
-    if t:lower():find("pirate") then return Color3.fromRGB(255,70,70) end
-    return Color3.fromRGB(180,180,180)
+    if not ok then return Color3.fromRGB(180, 180, 180) end
+    if t:lower():find("marine") then return Color3.fromRGB(90, 180, 255) end
+    if t:lower():find("pirate") then return Color3.fromRGB(255, 70,  70)  end
+    return Color3.fromRGB(180, 180, 180)
+end
+
+local function Notify(title, text, dur)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {Title=title, Text=text, Duration=dur or 2})
+    end)
 end
 
 -- ════════════════════════════════════════════════════════
@@ -111,24 +183,20 @@ end
 -- ════════════════════════════════════════════════════════
 spawn(function()
     while wait(0.5) do pcall(function()
-        for _, v in pairs(LP.Backpack:GetChildren()) do
-            if v:IsA("Tool") and v:FindFirstChild("RemoteFunctionShoot") then
-                SelectWeaponGun = v.Name
-            end
-        end
-        local char = LP.Character
-        if char then
-            for _, v in pairs(char:GetChildren()) do
+        local function scan(c)
+            for _, v in pairs(c:GetChildren()) do
                 if v:IsA("Tool") and v:FindFirstChild("RemoteFunctionShoot") then
                     SelectWeaponGun = v.Name
                 end
             end
         end
+        scan(LP.Backpack)
+        if LP.Character then scan(LP.Character) end
     end) end
 end)
 
 -- ════════════════════════════════════════════════════════
---  AUTO HAKI (Buso)
+--  AUTO HAKI
 -- ════════════════════════════════════════════════════════
 spawn(function()
     while task.wait(0.1) do pcall(function()
@@ -138,6 +206,69 @@ spawn(function()
             ReplicatedStorage.Remotes.CommF_:InvokeServer("Buso")
         end
     end) end
+end)
+
+-- ════════════════════════════════════════════════════════
+--  SILENT AIM  (from QuixHub – hooks __namecall cleanly)
+-- ════════════════════════════════════════════════════════
+local _raw = getrawmetatable(game)
+local _origNamecall = _raw.__namecall
+setreadonly(_raw, false)
+_raw.__namecall = newcclosure(function(self, ...)
+    local args   = {...}
+    local method = getnamecallmethod()
+    if CFG.SilentAim and (method == "FireServer" or method == "InvokeServer") then
+        local tHRP = GetNearest()
+        if tHRP then
+            local pos = GetAimPos(tHRP)
+            for i, v in ipairs(args) do
+                if typeof(v) == "Vector3" then args[i] = pos
+                elseif typeof(v) == "CFrame"  then args[i] = CFrame.new(pos) end
+            end
+        end
+    end
+    return _origNamecall(self, unpack(args))
+end)
+setreadonly(_raw, true)
+
+-- ════════════════════════════════════════════════════════
+--  CAMLOCK
+-- ════════════════════════════════════════════════════════
+RunService.RenderStepped:Connect(function()
+    if not CFG.CamLock then return end
+    local hrp = GetNearest()
+    if hrp then Cam.CFrame = CFrame.new(Cam.CFrame.Position, hrp.Position) end
+end)
+
+-- ════════════════════════════════════════════════════════
+--  AIMBOT GUN
+-- ════════════════════════════════════════════════════════
+RunService.Heartbeat:Connect(function()
+    if not CFG.AimbotGun then return end
+    local hrp  = GetNearest(); if not hrp then return end
+    local char = LP.Character; if not char then return end
+    local gun  = char:FindFirstChild(SelectWeaponGun)
+    if gun and gun:FindFirstChild("RemoteFunctionShoot") then
+        pcall(function()
+            gun.RemoteFunctionShoot:InvokeServer(GetAimPos(hrp), GetAimPart(hrp))
+        end)
+    end
+end)
+
+-- ════════════════════════════════════════════════════════
+--  AIMBOT SKILL
+-- ════════════════════════════════════════════════════════
+RunService.RenderStepped:Connect(function()
+    if not CFG.AimbotSkill then return end
+    local hrp  = GetNearest(); if not hrp then return end
+    local char = LP.Character; if not char then return end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool and char:FindFirstChild(tool.Name) then
+        local t = char[tool.Name]
+        if t:FindFirstChild("MousePos") then
+            pcall(function() t.RemoteEvent:FireServer(GetAimPos(hrp)) end)
+        end
+    end
 end)
 
 -- ════════════════════════════════════════════════════════
@@ -157,8 +288,9 @@ spawn(function()
         for _, e in ipairs(folder:GetChildren()) do
             local head = e:FindFirstChild("Head")
             if head and IsAlive(e) and e ~= LP.Character then
-                local d = LP:DistanceFromCharacter(head.Position)
-                if d < 100 then table.insert(list,{e,head}); base = head end
+                if LP:DistanceFromCharacter(head.Position) < 100 then
+                    table.insert(list, {e, head}); base = head
+                end
             end
         end
         return list, base
@@ -166,194 +298,191 @@ spawn(function()
 
     while true do
         if not CFG.FastAttack then task.wait(0.05); continue end
-        task.wait(CFG.FastAtkDelay)
-        local char = LP.Character; if not char then continue end
+        if CFG.FastAtkDelay > 0 then task.wait(CFG.FastAtkDelay) end
+        local char = LP.Character; if not char then task.wait(0.05); continue end
         local eList, b1 = Collect(workspace:FindFirstChild("Enemies"))
         local cList, b2 = Collect(workspace:FindFirstChild("Characters"))
-        for _, d in ipairs(cList) do table.insert(eList,d) end
+        for _, d in ipairs(cList) do table.insert(eList, d) end
         local tool = char:FindFirstChildOfClass("Tool")
         if tool and tool:FindFirstChild("LeftClickRemote") then
             for _, d in ipairs(eList) do
                 local dir = (d[1].HumanoidRootPart.Position - char:GetPivot().Position).Unit
-                pcall(function() tool.LeftClickRemote:FireServer(dir,1) end)
+                pcall(function() tool.LeftClickRemote:FireServer(dir, 1) end)
             end
         elseif #eList > 0 then
             pcall(function() RegAtk:FireServer(0) end)
             pcall(function() RegHit:FireServer(b1 or b2, eList) end)
         end
+        task.wait(0)
     end
 end)
 
 -- ════════════════════════════════════════════════════════
---  AIMBOT GUN
+--  ESP PLAYER  (QuixHub-style BillboardGui into a Folder)
 -- ════════════════════════════════════════════════════════
-RunService.Heartbeat:Connect(function()
-    if not CFG.AimbotGun then return end
-    local t = GetTarget(); if not t then return end
-    local pos = GetAimPos(t); if not pos then return end
-    local part = GetAimPart(t); if not part then return end
-    local char = LP.Character; if not char then return end
-    local gun = char:FindFirstChild(SelectWeaponGun)
-    if gun and gun:FindFirstChild("RemoteFunctionShoot") then
-        pcall(function() gun.RemoteFunctionShoot:InvokeServer(pos, part) end)
-    end
-end)
+local espFolder = Instance.new("Folder")
+espFolder.Name  = "BunniESP_Folder"
+espFolder.Parent = GetGuiParent()
 
--- ════════════════════════════════════════════════════════
---  AIMBOT SKILL
--- ════════════════════════════════════════════════════════
-RunService.RenderStepped:Connect(function()
-    if not CFG.AimbotSkill then return end
-    local t = GetTarget(); if not t then return end
-    local pos = GetAimPos(t); if not pos then return end
-    local char = LP.Character; if not char then return end
-    local tool = char:FindFirstChildOfClass("Tool")
-    if tool and char:FindFirstChild(tool.Name) then
-        local tr = char[tool.Name]
-        if tr:FindFirstChild("MousePos") then
-            pcall(function() tr.RemoteEvent:FireServer(pos) end)
-        end
-    end
-end)
-
--- ════════════════════════════════════════════════════════
---  SILENT AIM
--- ════════════════════════════════════════════════════════
-pcall(function()
-    local raw = getrawmetatable(game)
-    local orig = raw.__namecall
-    setreadonly(raw, false)
-    raw.__namecall = newcclosure(function(...)
-        local method = getnamecallmethod()
-        local args = {...}
-        if CFG.SilentAim and method == "FireServer" then
-            local t = GetTarget()
-            if t then
-                local pos = GetAimPos(t)
-                if pos then
-                    for i,v in ipairs(args) do
-                        if typeof(v) == "Vector3" then args[i] = pos end
-                    end
-                end
-            end
-        end
-        return orig(unpack(args))
-    end)
-    setreadonly(raw, true)
-end)
-
--- ════════════════════════════════════════════════════════
---  CAMLOCK
--- ════════════════════════════════════════════════════════
-RunService.RenderStepped:Connect(function()
-    if not CFG.CamLock then return end
-    local t = GetTarget()
-    if t and t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
-        Cam.CFrame = CFrame.new(Cam.CFrame.Position, t.Character.HumanoidRootPart.Position)
-    end
-end)
-
--- ════════════════════════════════════════════════════════
---  ESP PLAYER
--- ════════════════════════════════════════════════════════
 spawn(function()
-    while wait(0.35) do pcall(function()
-        for _, v in ipairs(Players:GetPlayers()) do
-            if v == LP then continue end
-            if not v.Character then continue end
-            local head = v.Character:FindFirstChild("Head")
-            if not head then continue end
+    while true do
+        if not CFG.ESPPlayer then
+            espFolder:ClearAllChildren()
+            task.wait(0.5)
+            continue
+        end
 
-            local myRoot = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-            local dist = myRoot and (head.Position - myRoot.Position).Magnitude or math.huge
+        local myChar = LP.Character
+        local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
 
-            if CFG.ESPPlayer and dist <= CFG.ESPRange then
-                if not head:FindFirstChild("BESP_"..ESPTag) then
-                    local bg = Instance.new("BillboardGui", head)
-                    bg.Name = "BESP_"..ESPTag
+        if myHRP then
+            for _, v in ipairs(Players:GetPlayers()) do
+                if v == LP then continue end
+                local char = v.Character
+                local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+                local hum  = char and char:FindFirstChild("Humanoid")
+
+                if not hrp or not hum or hum.Health <= 0 then
+                    local old = espFolder:FindFirstChild(v.Name)
+                    if old then old:Destroy() end
+                    continue
+                end
+
+                local dist = (hrp.Position - myHRP.Position).Magnitude
+                if dist > CFG.ESPRange then
+                    local old = espFolder:FindFirstChild(v.Name)
+                    if old then old:Destroy() end
+                    continue
+                end
+
+                -- Create or get billboard
+                local bg = espFolder:FindFirstChild(v.Name)
+                if not bg then
+                    bg = Instance.new("BillboardGui", espFolder)
+                    bg.Name        = v.Name
+                    bg.Size        = UDim2.new(0, 200, 0, 62)
+                    bg.StudsOffset = Vector3.new(0, 3.5, 0)
                     bg.AlwaysOnTop = true
-                    bg.Size = UDim2.new(0,200,0,58)
-                    bg.StudsOffset = Vector3.new(0,3.2,0)
 
+                    -- Name + level label
                     local nl = Instance.new("TextLabel", bg)
-                    nl.Name = "NL"; nl.Size = UDim2.new(1,0,0,20)
-                    nl.BackgroundTransparency = 1; nl.Font = Enum.Font.GothamBold
-                    nl.TextSize = 13; nl.TextStrokeTransparency = 0.2
+                    nl.Name = "NL"; nl.Size = UDim2.new(1,0,0,22)
+                    nl.BackgroundTransparency = 1
+                    nl.Font = Enum.Font.GothamBold; nl.TextSize = 13
+                    nl.TextStrokeTransparency = 0.2
                     nl.TextStrokeColor3 = Color3.new(0,0,0)
 
+                    -- Info label (dist + hp%)
                     local il = Instance.new("TextLabel", bg)
                     il.Name = "IL"; il.Size = UDim2.new(1,0,0,14)
-                    il.Position = UDim2.new(0,0,0,20)
-                    il.BackgroundTransparency = 1; il.Font = Enum.Font.Gotham
-                    il.TextSize = 11; il.TextColor3 = Color3.fromRGB(180,180,180)
+                    il.Position = UDim2.new(0,0,0,22)
+                    il.BackgroundTransparency = 1
+                    il.Font = Enum.Font.Gotham; il.TextSize = 11
+                    il.TextColor3 = Color3.fromRGB(180,180,180)
                     il.TextStrokeTransparency = 0.3
                     il.TextStrokeColor3 = Color3.new(0,0,0)
 
-                    local barBg = Instance.new("Frame", bg)
-                    barBg.Name = "BB"; barBg.Size = UDim2.new(0.8,0,0,5)
-                    barBg.Position = UDim2.new(0.1,0,0,38)
-                    barBg.BackgroundColor3 = Color3.fromRGB(30,30,30); barBg.BorderSizePixel = 0
-                    Instance.new("UICorner", barBg).CornerRadius = UDim.new(1,0)
+                    -- HP bar bg
+                    local bb = Instance.new("Frame", bg)
+                    bb.Name = "BB"; bb.Size = UDim2.new(0.82, 0, 0, 5)
+                    bb.Position = UDim2.new(0.09, 0, 0, 40)
+                    bb.BackgroundColor3 = Color3.fromRGB(28,28,28)
+                    bb.BorderSizePixel = 0
+                    Instance.new("UICorner", bb).CornerRadius = UDim.new(1,0)
 
-                    local barFill = Instance.new("Frame", barBg)
-                    barFill.Name = "BF"; barFill.Size = UDim2.new(1,0,1,0)
-                    barFill.BorderSizePixel = 0; barFill.BackgroundColor3 = Color3.fromRGB(60,220,60)
-                    Instance.new("UICorner", barFill).CornerRadius = UDim.new(1,0)
+                    local bf = Instance.new("Frame", bb)
+                    bf.Name = "BF"; bf.Size = UDim2.new(1,0,1,0)
+                    bf.BorderSizePixel = 0
+                    Instance.new("UICorner", bf).CornerRadius = UDim.new(1,0)
                 end
 
-                local esp = head:FindFirstChild("BESP_"..ESPTag)
-                if esp then
-                    local hum = v.Character:FindFirstChild("Humanoid")
-                    local hp  = hum and math.clamp(hum.Health/hum.MaxHealth,0,1) or 0
-                    local col = TeamColor(v)
-                    esp.NL.Text       = v.Name.."  [Lv."..GetLevel(v).."]"
-                    esp.NL.TextColor3 = col
-                    esp.IL.Text       = M(dist).."m  ·  "..math.floor(hp*100).."%"
-                    local bf = esp.BB:FindFirstChild("BF")
-                    if bf then
-                        bf.Size = UDim2.new(hp,0,1,0)
-                        bf.BackgroundColor3 = hp > 0.6
-                            and Color3.fromRGB(55,210,55)
-                            or  hp > 0.3 and Color3.fromRGB(230,185,0)
-                            or  Color3.fromRGB(215,45,45)
+                if bg.Adornee ~= hrp then bg.Adornee = hrp end
+
+                local hp    = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+                local lvl   = GetLevel(v)
+                local col   = TeamColor(v)
+                local metres = M(dist)
+
+                -- Same-team marines get green (QuixHub logic)
+                if LP.Team and v.Team then
+                    if tostring(LP.Team) == "Marines" and tostring(v.Team) == "Marines" then
+                        col = Color3.fromRGB(60, 220, 60)
                     end
                 end
-            else
-                local esp = head:FindFirstChild("BESP_"..ESPTag)
-                if esp then esp:Destroy() end
+
+                bg.NL.Text        = v.Name .. "  [Lv." .. lvl .. "]"
+                bg.NL.TextColor3  = col
+                bg.IL.Text        = metres .. "m  ·  " .. math.floor(hum.Health) .. " HP  (" .. math.floor(hp*100) .. "%)"
+                local bf = bg.BB:FindFirstChild("BF")
+                if bf then
+                    bf.Size = UDim2.new(hp, 0, 1, 0)
+                    bf.BackgroundColor3 = hp > 0.6
+                        and Color3.fromRGB(55, 210, 55)
+                        or  hp > 0.3 and Color3.fromRGB(230, 185, 0)
+                        or  Color3.fromRGB(215, 45, 45)
+                end
             end
         end
-    end) end
+        task.wait(0.4)
+    end
 end)
 
 -- ════════════════════════════════════════════════════════
---  WALK ON WATER
+--  WALK ON WATER  (QuixHub smart raycast platform)
 -- ════════════════════════════════════════════════════════
-spawn(function()
-    while wait(1) do pcall(function()
-        local p = workspace.Map:FindFirstChild("WaterBase-Plane")
-        if p then
-            p.Size = CFG.WalkWater and Vector3.new(1000,112,1000) or Vector3.new(1000,80,1000)
-        end
-    end) end
-end)
+local waterPart = Instance.new("Part")
+waterPart.Name        = "BunniWaterPlatform"
+waterPart.Size        = Vector3.new(30, 1, 30)
+waterPart.Anchored    = true
+waterPart.Transparency = 1
+waterPart.CanCollide  = false
+waterPart.Parent      = workspace
 
--- ════════════════════════════════════════════════════════
---  SPEED HACK
--- ════════════════════════════════════════════════════════
 spawn(function()
     while task.wait(0.1) do pcall(function()
-        local char = LP.Character
-        local hum  = char and char:FindFirstChild("Humanoid")
-        if not hum then return end
-        if CFG.SpeedHack then
-            hum.WalkSpeed = CFG.WalkSpeed
+        if CFG.WalkWater and LP.Character then
+            local hrp = LP.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local ray = workspace:Raycast(hrp.Position, Vector3.new(0,-100,0), RaycastParams.new())
+                if ray and ray.Material == Enum.Material.Water then
+                    waterPart.CanCollide = true
+                    waterPart.CFrame     = CFrame.new(hrp.Position.X, ray.Position.Y + 0.5, hrp.Position.Z)
+                else
+                    waterPart.CanCollide = false
+                end
+            end
         else
-            if hum.WalkSpeed == CFG.WalkSpeed then
-                hum.WalkSpeed = 16
+            waterPart.CanCollide = false
+        end
+    end) end
+end)
+
+-- ════════════════════════════════════════════════════════
+--  NOCLIP
+-- ════════════════════════════════════════════════════════
+spawn(function()
+    while task.wait() do pcall(function()
+        if CFG.NoClip and LP.Character then
+            for _, v in ipairs(LP.Character:GetDescendants()) do
+                if v:IsA("BasePart") and v.CanCollide then
+                    v.CanCollide = false
+                end
             end
         end
     end) end
+end)
+
+-- ════════════════════════════════════════════════════════
+--  SPEED HACK  (QuixHub Heartbeat delta method)
+-- ════════════════════════════════════════════════════════
+RunService.Heartbeat:Connect(function()
+    if not CFG.SpeedHack then return end
+    local char = LP.Character; if not char then return end
+    local hum  = char:FindFirstChild("Humanoid")
+    local hrp  = char:FindFirstChild("HumanoidRootPart")
+    if hum and hrp and hum.MoveDirection.Magnitude > 0 then
+        hrp.CFrame = hrp.CFrame + hum.MoveDirection * (CFG.WalkSpeed - 16) * 0.02
+    end
 end)
 
 -- ════════════════════════════════════════════════════════
@@ -366,8 +495,8 @@ spawn(function()
         local hum  = char and char:FindFirstChild("Humanoid")
         local hrp  = char and char:FindFirstChild("HumanoidRootPart")
         if hum and hrp then
-            local threshold = (CFG.SafeHPThresh / 100) * hum.MaxHealth
-            if hum.Health <= threshold then
+            local thresh = (CFG.SafeHPThresh / 100) * hum.MaxHealth
+            if hum.Health <= thresh then
                 hrp.CFrame = hrp.CFrame + Vector3.new(0, 200, 0)
             end
         end
@@ -391,244 +520,257 @@ spawn(function()
 end)
 
 -- ════════════════════════════════════════════════════════
---  HIGH PERFORMANCE (logic from original Matsune script)
+--  HIGH PERFORMANCE  (original Matsune + QuixHub FPS boost)
 -- ════════════════════════════════════════════════════════
 local function ApplyHighPerf()
     settings().Rendering.QualityLevel = "Level01"
+    Lighting.GlobalShadows = false
+    Lighting.FogEnd = 9e9
+    -- Kill post-effects
+    for _, e in ipairs(Lighting:GetChildren()) do
+        if e:IsA("PostEffect") then e:Destroy() end
+    end
+    -- Strip particles, decals, shadows
     for _, v in ipairs(game:GetDescendants()) do
         pcall(function()
-            if v:IsA("Part") or v:IsA("Union") or v:IsA("CornerWedgePart") or v:IsA("TrussPart") then
-                v.Material = Enum.Material.Plastic
-                v.Reflectance = 0
+            if v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Smoke")
+                or v:IsA("Fire") or v:IsA("Sparkles") then
+                v.Enabled = false
             elseif v:IsA("Decal") or v:IsA("Texture") then
                 v.Transparency = 1
-            elseif v:IsA("ParticleEmitter") or v:IsA("Trail") then
-                v.Lifetime = NumberRange.new(0)
-            elseif v:IsA("Explosion") then
-                v.BlastPressure = 1; v.BlastRadius = 1
-            elseif v:IsA("Fire") or v:IsA("SpotLight") or v:IsA("Smoke") or v:IsA("Sparkles") then
-                v.Enabled = false
+            elseif v:IsA("BasePart") then
+                v.Material    = Enum.Material.SmoothPlastic
+                v.Reflectance = 0
+                v.CastShadow  = false
             end
         end)
     end
-    Lighting.FogEnd = 9e9
-    pcall(function() Lighting:FindFirstChildOfClass("Atmosphere"):Destroy() end)
-    pcall(function() Lighting:FindFirstChildOfClass("BloomEffect"):Destroy() end)
-    pcall(function() Lighting:FindFirstChildOfClass("BlurEffect"):Destroy() end)
-    pcall(function() Lighting:FindFirstChildOfClass("DepthOfFieldEffect"):Destroy() end)
-    pcall(function() Lighting:FindFirstChildOfClass("SunRaysEffect"):Destroy() end)
+    Notify("High Performance", "FPS Boost Applied!", 2)
 end
 
-spawn(function()
-    while wait(5) do
-        if CFG.HighPerf then pcall(ApplyHighPerf) end
+-- ════════════════════════════════════════════════════════
+--  ICE TP & KILL  (ported from QuixHub u98)
+-- ════════════════════════════════════════════════════════
+local function IceTPKill()
+    local nearChar = GetNearestChar(600)
+    if nearChar and nearChar:FindFirstChild("HumanoidRootPart") then
+        local myChar = LP.Character
+        if myChar and myChar:FindFirstChild("HumanoidRootPart") then
+            myChar.HumanoidRootPart.CFrame = nearChar.HumanoidRootPart.CFrame * CFrame.new(0, 0, 3)
+            local bp  = LP.Backpack
+            local hum = myChar:FindFirstChild("Humanoid")
+            -- Try ice fruit first
+            local ice = bp:FindFirstChild("Ice-Ice") or bp:FindFirstChild("Ice")
+                or myChar:FindFirstChild("Ice-Ice") or myChar:FindFirstChild("Ice")
+            if ice then
+                hum:EquipTool(ice); task.wait(0.1)
+                VirtualInput:SendKeyEvent(true,  Enum.KeyCode.V, false, game)
+                task.wait(0.05)
+                VirtualInput:SendKeyEvent(false, Enum.KeyCode.V, false, game)
+            else
+                -- Fallback: equip any non-special tool
+                for _, t in ipairs(bp:GetChildren()) do
+                    if t:IsA("Tool") and t.Name ~= "❄️ Ice TP & Kill"
+                        and t.Name ~= "Combat" and t.Name ~= "Godhuman" then
+                        hum:EquipTool(t); break
+                    end
+                end
+            end
+        end
+    else
+        Notify("Ice TP", "No enemy within 600m!", 2)
     end
-end)
+end
+
+-- ════════════════════════════════════════════════════════
+--  CLICK-TO-TP TOOL  (from QuixHub)
+-- ════════════════════════════════════════════════════════
+local function GiveTPTool()
+    local tool = Instance.new("Tool", LP.Backpack)
+    tool.Name = "Bunni TP"; tool.RequiresHandle = false
+    tool.Activated:Connect(function()
+        local m = LP:GetMouse()
+        if m.Hit and LP.Character then
+            LP.Character.HumanoidRootPart.CFrame = CFrame.new(m.Hit.Position + Vector3.new(0,5,0))
+        end
+    end)
+    Notify("Tool Added", "Bunni TP in backpack!", 2)
+end
 
 -- ════════════════════════════════════════════════════════════════════════
 --  ██╗   ██╗██╗
---  ██║   ██║██║
---  ██║   ██║██║
---  ██║   ██║██║
+--  ██║   ██║██║     BLACK·PURPLE GLASS LIQUID
+--  ██║   ██║██║     FUTURISTIC · MINIMAL · FAST
 --  ╚██████╔╝██║
 --   ╚═════╝ ╚═╝
---  BLACK-PURPLE GLASS LIQUID  ·  FUTURISTIC
 -- ════════════════════════════════════════════════════════════════════════
 
 local gui = Instance.new("ScreenGui")
-gui.Name = "BunniR_v2"; gui.ResetOnSpawn = false
+gui.Name = "BunniR_v3"; gui.ResetOnSpawn = false
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-pcall(function() if syn then syn.protect_gui(gui) end; gui.Parent = game.CoreGui end)
+pcall(function()
+    if syn then syn.protect_gui(gui) end
+    gui.Parent = GetGuiParent()
+end)
 if not gui.Parent then gui.Parent = LP:WaitForChild("PlayerGui") end
 
--- ── Palette ───────────────────────────────────────────────────────────────
+-- ── Palette ──────────────────────────────────────────────────────────────
 local P = {
-    void        = Color3.fromRGB(4,   4,   8),     -- near-black bg
-    glass       = Color3.fromRGB(14,  10,  24),    -- dark glass panel
-    glassEdge   = Color3.fromRGB(28,  16,  52),    -- panel border
-    purpleDeep  = Color3.fromRGB(88,  30, 180),    -- primary purple
-    purpleMid   = Color3.fromRGB(130,  50, 230),   -- mid purple glow
-    purpleGlow  = Color3.fromRGB(175,  80, 255),   -- bright purple
-    crimson     = Color3.fromRGB(200,  30,  60),   -- accent red (logo crosshair)
-    white       = Color3.fromRGB(235, 230, 255),   -- near-white with purple tint
-    muted       = Color3.fromRGB(110, 100, 140),   -- muted text
-    rowBg       = Color3.fromRGB(10,   8,  20),    -- toggle row bg
-    onColor     = Color3.fromRGB(160,  50, 255),   -- toggle ON
-    offColor    = Color3.fromRGB(30,   25,  50),   -- toggle OFF
+    bg          = Color3.fromRGB(6,   4,  14),
+    glass       = Color3.fromRGB(13,  9,  26),
+    glassEdge   = Color3.fromRGB(26,  16,  52),
+    sidebar     = Color3.fromRGB(9,   6,  20),
+    item        = Color3.fromRGB(17,  12,  34),
+    itemHover   = Color3.fromRGB(24,  17,  46),
+    accent      = Color3.fromRGB(180,  50, 255),
+    accentDim   = Color3.fromRGB(90,   25, 130),
+    accentGlow  = Color3.fromRGB(210,  90, 255),
+    red         = Color3.fromRGB(220,  40,  60),
+    green       = Color3.fromRGB(55,  210,  80),
+    white       = Color3.fromRGB(230, 220, 255),
+    muted       = Color3.fromRGB(100,  85, 140),
+    scrollBar   = Color3.fromRGB(120,  40, 200),
+    onPill      = Color3.fromRGB(150,  40, 240),
+    offPill     = Color3.fromRGB(30,   22,  55),
+    knobOn      = Color3.fromRGB(220, 180, 255),
+    knobOff     = Color3.fromRGB(80,   65, 110),
 }
 
--- ── Drag helper ───────────────────────────────────────────────────────────
+-- ── Utilities ─────────────────────────────────────────────────────────────
+local function Corner(f, r) Instance.new("UICorner",f).CornerRadius = UDim.new(0, r or 6) end
+local function Stroke(f, c, t)
+    local s = Instance.new("UIStroke",f)
+    s.Color = c or P.accentDim; s.Thickness = t or 1
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+end
+local function Pad(f, l, r, t, b)
+    local p = Instance.new("UIPadding",f)
+    p.PaddingLeft   = UDim.new(0, l or 0); p.PaddingRight  = UDim.new(0, r or 0)
+    p.PaddingTop    = UDim.new(0, t or 0); p.PaddingBottom = UDim.new(0, b or 0)
+end
+local function List(f, dir, pad, sort)
+    local l = Instance.new("UIListLayout",f)
+    l.FillDirection = dir or Enum.FillDirection.Vertical
+    l.SortOrder     = sort or Enum.SortOrder.LayoutOrder
+    l.Padding       = UDim.new(0, pad or 4)
+    return l
+end
+
 local function Draggable(frame, handle)
     local drag, dIn, dSt, dPos
     handle.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
-            drag = true; dSt = i.Position; dPos = frame.Position
+            drag=true; dSt=i.Position; dPos=frame.Position
             i.Changed:Connect(function()
-                if i.UserInputState == Enum.UserInputState.End then drag = false end
+                if i.UserInputState==Enum.UserInputState.End then drag=false end
             end)
         end
     end)
     handle.InputChanged:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseMovement then dIn = i end
+        if i.UserInputType==Enum.UserInputType.MouseMovement then dIn=i end
     end)
     UserInputService.InputChanged:Connect(function(i)
-        if drag and i == dIn then
-            local d = i.Position - dSt
-            frame.Position = UDim2.new(dPos.X.Scale, dPos.X.Offset+d.X, dPos.Y.Scale, dPos.Y.Offset+d.Y)
+        if drag and i==dIn then
+            local d=i.Position-dSt
+            frame.Position=UDim2.new(dPos.X.Scale,dPos.X.Offset+d.X,dPos.Y.Scale,dPos.Y.Offset+d.Y)
         end
     end)
 end
 
--- ── Glow helper ───────────────────────────────────────────────────────────
-local function AddStroke(parent, color, thick)
-    local s = Instance.new("UIStroke", parent)
-    s.Color = color; s.Thickness = thick or 1; s.Transparency = 0.1
-    return s
-end
-
-local function GlowCorner(parent, r)
-    Instance.new("UICorner", parent).CornerRadius = UDim.new(0, r or 8)
-end
-
 -- ── Main window ───────────────────────────────────────────────────────────
 local WIN = Instance.new("Frame", gui)
-WIN.Name = "Win"
-WIN.Size = UDim2.new(0, 250, 0, 420)
-WIN.Position = UDim2.new(0.03, 0, 0.2, 0)
-WIN.BackgroundColor3 = P.glass
-WIN.BorderSizePixel = 0
-WIN.ClipsDescendants = false
-GlowCorner(WIN, 12)
-AddStroke(WIN, P.purpleDeep, 1.5)
+WIN.Size     = UDim2.new(0, 560, 0, 340)
+WIN.Position = UDim2.new(0.5,-280, 0.5,-170)
+WIN.BackgroundColor3 = P.bg
+WIN.BorderSizePixel  = 0
+WIN.ClipsDescendants = true
+Corner(WIN, 12)
+Stroke(WIN, P.accentDim, 1.2)
 
--- Outer glow frame (purely decorative, slightly larger, very transparent)
-local outerGlow = Instance.new("Frame", gui)
-outerGlow.Size = UDim2.new(0, 262, 0, 432)
-outerGlow.Position = UDim2.new(0, 0, 0, 0)   -- repositioned below
-outerGlow.BackgroundColor3 = P.purpleMid
-outerGlow.BackgroundTransparency = 0.88
-outerGlow.BorderSizePixel = 0
-outerGlow.ZIndex = 0
-GlowCorner(outerGlow, 14)
--- Keep glow aligned with WIN
-WIN:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
-    outerGlow.Position = UDim2.new(0,
-        WIN.AbsolutePosition.X - 6,
-        0,
-        WIN.AbsolutePosition.Y - 6)
-end)
-
--- ── Header bar ────────────────────────────────────────────────────────────
+-- ── Header ────────────────────────────────────────────────────────────────
 local HDR = Instance.new("Frame", WIN)
-HDR.Name = "HDR"
-HDR.Size = UDim2.new(1, 0, 0, 46)
-HDR.BackgroundColor3 = P.glassEdge
-HDR.BorderSizePixel = 0
-GlowCorner(HDR, 12)
+HDR.Size             = UDim2.new(1,0,0,38)
+HDR.BackgroundColor3 = P.glass
+HDR.BorderSizePixel  = 0
+Corner(HDR, 12)
 Draggable(WIN, HDR)
 
--- Thin purple line under header
-local hdrLine = Instance.new("Frame", HDR)
-hdrLine.Size = UDim2.new(1, -24, 0, 1)
-hdrLine.Position = UDim2.new(0, 12, 1, 0)
-hdrLine.BackgroundColor3 = P.purpleMid
-hdrLine.BackgroundTransparency = 0.4
-hdrLine.BorderSizePixel = 0
+-- Thin accent underline
+local hLine = Instance.new("Frame", HDR)
+hLine.Size     = UDim2.new(1,-24,0,1)
+hLine.Position = UDim2.new(0,12,1,-1)
+hLine.BackgroundColor3 = P.accent
+hLine.BackgroundTransparency = 0.55
+hLine.BorderSizePixel = 0
 
--- Bunny logo icon
 local logoLbl = Instance.new("TextLabel", HDR)
-logoLbl.Size = UDim2.new(0, 34, 0, 34)
-logoLbl.Position = UDim2.new(0, 8, 0.5, -17)
-logoLbl.BackgroundTransparency = 1
-logoLbl.Text = "🐰"
-logoLbl.TextSize = 24
-logoLbl.Font = Enum.Font.GothamBold
-logoLbl.TextColor3 = P.white
+logoLbl.Size=UDim2.new(0,30,0,30); logoLbl.Position=UDim2.new(0,8,0.5,-15)
+logoLbl.BackgroundTransparency=1; logoLbl.Text="🐰"
+logoLbl.TextSize=22; logoLbl.Font=Enum.Font.GothamBold
 
 local titleLbl = Instance.new("TextLabel", HDR)
-titleLbl.Size = UDim2.new(1, -80, 0, 18)
-titleLbl.Position = UDim2.new(0, 46, 0, 6)
-titleLbl.BackgroundTransparency = 1
-titleLbl.Text = "BUNNI_R"
-titleLbl.Font = Enum.Font.GothamBold
-titleLbl.TextSize = 15
-titleLbl.TextColor3 = P.white
-titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+titleLbl.Size=UDim2.new(0,120,0,20); titleLbl.Position=UDim2.new(0,44,0,4)
+titleLbl.BackgroundTransparency=1; titleLbl.Text="BUNNI_R"
+titleLbl.Font=Enum.Font.GothamBold; titleLbl.TextSize=15
+titleLbl.TextColor3=P.white; titleLbl.TextXAlignment=Enum.TextXAlignment.Left
 
 local subLbl = Instance.new("TextLabel", HDR)
-subLbl.Size = UDim2.new(1, -80, 0, 13)
-subLbl.Position = UDim2.new(0, 46, 0, 26)
-subLbl.BackgroundTransparency = 1
-subLbl.Text = "PVP SUITE  ·  v2.0"
-subLbl.Font = Enum.Font.Gotham
-subLbl.TextSize = 9
-subLbl.TextColor3 = P.muted
-subLbl.TextXAlignment = Enum.TextXAlignment.Left
+subLbl.Size=UDim2.new(0,160,0,13); subLbl.Position=UDim2.new(0,44,0,22)
+subLbl.BackgroundTransparency=1; subLbl.Text="PVP SUITE  ·  v3.0"
+subLbl.Font=Enum.Font.Gotham; subLbl.TextSize=9
+subLbl.TextColor3=P.muted; subLbl.TextXAlignment=Enum.TextXAlignment.Left
 
--- Minimise
+-- Target pill in header
+local tgtPill = Instance.new("Frame", HDR)
+tgtPill.Size=UDim2.new(0,220,0,24); tgtPill.Position=UDim2.new(0.5,-80,0.5,-12)
+tgtPill.BackgroundColor3=P.item; tgtPill.BorderSizePixel=0
+Corner(tgtPill,12); Stroke(tgtPill,P.accentDim,1)
+
+local tgtDot = Instance.new("Frame", tgtPill)
+tgtDot.Size=UDim2.new(0,7,0,7); tgtDot.Position=UDim2.new(0,10,0.5,-3.5)
+tgtDot.BackgroundColor3=P.red; tgtDot.BorderSizePixel=0; Corner(tgtDot,4)
+
+local tgtLbl = Instance.new("TextLabel", tgtPill)
+tgtLbl.Size=UDim2.new(1,-26,1,0); tgtLbl.Position=UDim2.new(0,24,0,0)
+tgtLbl.BackgroundTransparency=1; tgtLbl.Text="No target"
+tgtLbl.Font=Enum.Font.GothamSemibold; tgtLbl.TextSize=10
+tgtLbl.TextColor3=P.muted; tgtLbl.TextXAlignment=Enum.TextXAlignment.Left
+
+-- Minimise btn
 local MINBTN = Instance.new("TextButton", HDR)
-MINBTN.Size = UDim2.new(0, 26, 0, 26)
-MINBTN.Position = UDim2.new(1, -32, 0.5, -13)
-MINBTN.BackgroundColor3 = Color3.fromRGB(22, 16, 40)
-MINBTN.Text = "−"; MINBTN.Font = Enum.Font.GothamBold
-MINBTN.TextSize = 16; MINBTN.TextColor3 = P.muted
-MINBTN.BorderSizePixel = 0
-GlowCorner(MINBTN, 5)
-AddStroke(MINBTN, P.purpleDeep, 1)
+MINBTN.Size=UDim2.new(0,26,0,26); MINBTN.Position=UDim2.new(1,-32,0.5,-13)
+MINBTN.BackgroundColor3=P.item; MINBTN.Text="−"
+MINBTN.Font=Enum.Font.GothamBold; MINBTN.TextSize=16
+MINBTN.TextColor3=P.muted; MINBTN.BorderSizePixel=0
+Corner(MINBTN,5); Stroke(MINBTN,P.accentDim,1)
 
--- ── Target pill ───────────────────────────────────────────────────────────
-local TGT = Instance.new("Frame", WIN)
-TGT.Size = UDim2.new(1, -16, 0, 26)
-TGT.Position = UDim2.new(0, 8, 0, 52)
-TGT.BackgroundColor3 = P.rowBg
-TGT.BorderSizePixel = 0
-GlowCorner(TGT, 6)
-AddStroke(TGT, P.purpleDeep, 1)
-
-local tgtDot = Instance.new("Frame", TGT)
-tgtDot.Size = UDim2.new(0, 7, 0, 7)
-tgtDot.Position = UDim2.new(0, 10, 0.5, -3.5)
-tgtDot.BackgroundColor3 = P.crimson
-tgtDot.BorderSizePixel = 0
-GlowCorner(tgtDot, 4)
-
-local tgtLbl = Instance.new("TextLabel", TGT)
-tgtLbl.Size = UDim2.new(1, -30, 1, 0)
-tgtLbl.Position = UDim2.new(0, 24, 0, 0)
-tgtLbl.BackgroundTransparency = 1
-tgtLbl.Text = "No target in range"
-tgtLbl.Font = Enum.Font.GothamSemibold
-tgtLbl.TextSize = 10
-tgtLbl.TextColor3 = P.muted
-tgtLbl.TextXAlignment = Enum.TextXAlignment.Left
-
--- Pulse the dot when target found
-local dotPulsing = false
+-- ── Target updater ────────────────────────────────────────────────────────
+local dotPulse = false
 local function PulseDot(on)
-    if on and not dotPulsing then
-        dotPulsing = true
+    if on == dotPulse then return end
+    dotPulse = on
+    if on then
         spawn(function()
-            while dotPulsing do
-                TweenService:Create(tgtDot,TweenInfo.new(0.5),{BackgroundTransparency=0.7}):Play()
-                wait(0.5)
-                TweenService:Create(tgtDot,TweenInfo.new(0.5),{BackgroundTransparency=0}):Play()
-                wait(0.5)
+            while dotPulse do
+                TweenService:Create(tgtDot,TweenInfo.new(0.45),{BackgroundTransparency=0.75}):Play()
+                wait(0.45)
+                if not dotPulse then break end
+                TweenService:Create(tgtDot,TweenInfo.new(0.45),{BackgroundTransparency=0}):Play()
+                wait(0.45)
             end
-            tgtDot.BackgroundTransparency = 0
         end)
-    elseif not on then
-        dotPulsing = false
     end
 end
 
 spawn(function()
     while wait(0.25) do pcall(function()
-        local t = GetTarget()
-        if t and t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
+        local hrp = GetNearest()
+        if hrp and hrp.Parent then
             local myR = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-            local d = myR and M((t.Character.HumanoidRootPart.Position-myR.Position).Magnitude) or 0
-            tgtLbl.Text = t.Name.."  [Lv."..GetLevel(t).."]  "..d.."m"
-            tgtLbl.TextColor3 = TeamColor(t)
+            local d   = myR and M((hrp.Position-myR.Position).Magnitude) or 0
+            local p   = Players:GetPlayerFromCharacter(hrp.Parent)
+            tgtLbl.Text      = (p and p.Name or "?").."  [Lv."..(p and GetLevel(p) or "?").."]  "..d.."m"
+            tgtLbl.TextColor3 = p and TeamColor(p) or P.white
             PulseDot(true)
         else
             tgtLbl.Text = "No target in range"
@@ -638,178 +780,195 @@ spawn(function()
     end) end
 end)
 
--- ── Tab bar ───────────────────────────────────────────────────────────────
-local TAB_BAR = Instance.new("Frame", WIN)
-TAB_BAR.Size = UDim2.new(1, -16, 0, 28)
-TAB_BAR.Position = UDim2.new(0, 8, 0, 84)
-TAB_BAR.BackgroundColor3 = P.rowBg
-TAB_BAR.BorderSizePixel = 0
-GlowCorner(TAB_BAR, 7)
-AddStroke(TAB_BAR, P.glassEdge, 1)
+-- ── Sidebar ───────────────────────────────────────────────────────────────
+local SIDEBAR = Instance.new("ScrollingFrame", WIN)
+SIDEBAR.Size     = UDim2.new(0,130,1,-38)
+SIDEBAR.Position = UDim2.new(0,0,0,38)
+SIDEBAR.BackgroundColor3 = P.sidebar
+SIDEBAR.BorderSizePixel  = 0
+SIDEBAR.ScrollBarThickness = 0
+SIDEBAR.AutomaticCanvasSize = Enum.AutomaticSize.Y
+SIDEBAR.CanvasSize = UDim2.new(0,0,0,0)
+List(SIDEBAR, nil, 3)
+Pad(SIDEBAR, 8, 8, 10, 8)
 
-local tabList = Instance.new("UIListLayout", TAB_BAR)
-tabList.FillDirection = Enum.FillDirection.Horizontal
-tabList.SortOrder = Enum.SortOrder.LayoutOrder
-tabList.Padding = UDim.new(0, 2)
-Instance.new("UIPadding", TAB_BAR).PaddingLeft = UDim.new(0, 3)
+-- ── Content area ──────────────────────────────────────────────────────────
+local CONTENT = Instance.new("ScrollingFrame", WIN)
+CONTENT.Size     = UDim2.new(1,-138,1,-38)
+CONTENT.Position = UDim2.new(0,134,0,42)
+CONTENT.BackgroundTransparency = 1
+CONTENT.BorderSizePixel  = 0
+CONTENT.ScrollBarThickness = 2
+CONTENT.ScrollBarImageColor3 = P.scrollBar
+CONTENT.AutomaticCanvasSize = Enum.AutomaticSize.Y
+CONTENT.CanvasSize = UDim2.new(0,0,0,0)
+List(CONTENT, nil, 6)
+Pad(CONTENT, 4, 8, 6, 10)
 
--- ── Content pages ─────────────────────────────────────────────────────────
-local PAGES = Instance.new("Frame", WIN)
-PAGES.Size = UDim2.new(1, 0, 1, -120)
-PAGES.Position = UDim2.new(0, 0, 0, 118)
-PAGES.BackgroundTransparency = 1
-PAGES.ClipsDescendants = true
+-- Vertical divider
+local divider = Instance.new("Frame", WIN)
+divider.Size=UDim2.new(0,1,1,-38); divider.Position=UDim2.new(0,130,0,38)
+divider.BackgroundColor3=P.accentDim; divider.BackgroundTransparency=0.6
+divider.BorderSizePixel=0
 
-local function MakePage()
-    local scroll = Instance.new("ScrollingFrame", PAGES)
-    scroll.Size = UDim2.new(1, 0, 1, 0)
-    scroll.BackgroundTransparency = 1
-    scroll.BorderSizePixel = 0
-    scroll.ScrollBarThickness = 2
-    scroll.ScrollBarImageColor3 = P.purpleMid
-    scroll.CanvasSize = UDim2.new(0,0,0,0)
-    scroll.Visible = false
-    local sl = Instance.new("UIListLayout", scroll)
-    sl.Padding = UDim.new(0, 3)
-    sl.SortOrder = Enum.SortOrder.LayoutOrder
-    local sp = Instance.new("UIPadding", scroll)
-    sp.PaddingLeft = UDim.new(0,8); sp.PaddingRight = UDim.new(0,8)
-    sp.PaddingTop = UDim.new(0,6); sp.PaddingBottom = UDim.new(0,8)
-    sl:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-        scroll.CanvasSize = UDim2.new(0,0,0, sl.AbsoluteContentSize.Y+14)
-    end)
-    return scroll
-end
+-- ── Tab system ────────────────────────────────────────────────────────────
+local tabs       = {}   -- {name, btn, items=[]}
+local curTab     = nil
 
-local tabPages = {}
-local tabBtns  = {}
-local tabNames = {"COMBAT","UTIL","SETTINGS"}
-local curTab   = 1
-
-for i, name in ipairs(tabNames) do
-    tabPages[i] = MakePage()
-
-    local tb = Instance.new("TextButton", TAB_BAR)
-    tb.Size = UDim2.new(0, 70, 1, -4)
-    tb.Position = UDim2.new(0, 0, 0, 2)
-    tb.BackgroundColor3 = i==1 and P.purpleDeep or Color3.fromRGB(0,0,0)
-    tb.BackgroundTransparency = i==1 and 0 or 1
-    tb.Text = name
-    tb.Font = Enum.Font.GothamBold
-    tb.TextSize = 9
-    tb.TextColor3 = i==1 and P.white or P.muted
-    tb.BorderSizePixel = 0
-    tb.LayoutOrder = i
-    GlowCorner(tb, 5)
-    tabBtns[i] = tb
-
-    tb.MouseButton1Click:Connect(function()
-        curTab = i
-        for j, p in ipairs(tabPages) do
-            p.Visible = j == i
-            tabBtns[j].BackgroundColor3 = j==i and P.purpleDeep or Color3.fromRGB(0,0,0)
-            tabBtns[j].BackgroundTransparency = j==i and 0 or 1
-            tabBtns[j].TextColor3 = j==i and P.white or P.muted
+local function ShowTab(name)
+    curTab = name
+    -- hide/show content items
+    for tName, tData in pairs(tabs) do
+        local active = tName == name
+        for _, item in ipairs(tData.items) do
+            item.Visible = active
         end
-    end)
+        -- highlight sidebar btn
+        TweenService:Create(tData.btn, TweenInfo.new(0.12), {
+            BackgroundColor3 = active and P.accentDim or Color3.fromRGB(0,0,0),
+            BackgroundTransparency = active and 0 or 1,
+        }):Play()
+        tData.btn.TextColor3 = active and P.white or P.muted
+    end
 end
-tabPages[1].Visible = true
+
+local function AddTab(name, icon)
+    local btn = Instance.new("TextButton", SIDEBAR)
+    btn.Size             = UDim2.new(1,0,0,34)
+    btn.BackgroundColor3 = Color3.fromRGB(0,0,0)
+    btn.BackgroundTransparency = 1
+    btn.Text             = icon .. "  " .. name
+    btn.Font             = Enum.Font.GothamBold
+    btn.TextSize         = 11
+    btn.TextColor3       = P.muted
+    btn.TextXAlignment   = Enum.TextXAlignment.Left
+    btn.AutoButtonColor  = false
+    btn.BorderSizePixel  = 0
+    Corner(btn, 5)
+    Pad(btn, 8, 0, 0, 0)
+
+    tabs[name] = {btn=btn, items={}}
+    btn.MouseButton1Click:Connect(function() ShowTab(name) end)
+    return name
+end
+
+-- Register item into active tab
+local function Reg(tabName, item)
+    item.Visible = false
+    table.insert(tabs[tabName].items, item)
+end
 
 -- ── Component builders ────────────────────────────────────────────────────
 local orderN = 0
 local function O() orderN=orderN+1; return orderN end
 
-local function Section(page, label)
-    local f = Instance.new("Frame", page)
-    f.Size = UDim2.new(1,0,0,18); f.BackgroundTransparency=1; f.LayoutOrder=O()
+local function Section(tabName, label)
+    local f = Instance.new("Frame", CONTENT)
+    f.Size=UDim2.new(1,0,0,20); f.BackgroundTransparency=1; f.LayoutOrder=O()
     local l = Instance.new("TextLabel",f)
-    l.Size = UDim2.new(1,0,1,0); l.BackgroundTransparency=1
-    l.Text = label:upper()
-    l.Font = Enum.Font.GothamBold; l.TextSize=9
-    l.TextColor3 = P.purpleGlow
-    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Size=UDim2.new(1,0,1,0); l.BackgroundTransparency=1
+    l.Text=label:upper(); l.Font=Enum.Font.GothamBold; l.TextSize=9
+    l.TextColor3=P.accent; l.TextXAlignment=Enum.TextXAlignment.Left
+    Reg(tabName, f)
 end
 
-local function Toggle(page, label, cfgKey, cb)
-    local row = Instance.new("Frame", page)
-    row.Size = UDim2.new(1,0,0,30)
-    row.BackgroundColor3 = P.rowBg
+local function Toggle(tabName, label, cfgKey, cb)
+    local row = Instance.new("Frame", CONTENT)
+    row.Size=UDim2.new(1,0,0,32); row.BackgroundColor3=P.item
     row.BorderSizePixel=0; row.LayoutOrder=O()
-    GlowCorner(row,6)
+    Corner(row, 6)
 
-    local lbl = Instance.new("TextLabel",row)
-    lbl.Size=UDim2.new(1,-48,1,0); lbl.Position=UDim2.new(0,10,0,0)
+    local lbl = Instance.new("TextLabel", row)
+    lbl.Size=UDim2.new(1,-52,1,0); lbl.Position=UDim2.new(0,10,0,0)
     lbl.BackgroundTransparency=1; lbl.Text=label
     lbl.Font=Enum.Font.Gotham; lbl.TextSize=11
-    lbl.TextColor3=P.white; lbl.TextXAlignment=Enum.TextXAlignment.Left
+    lbl.TextColor3=P.muted; lbl.TextXAlignment=Enum.TextXAlignment.Left
 
-    local pill = Instance.new("Frame",row)
-    pill.Size=UDim2.new(0,34,0,17); pill.Position=UDim2.new(1,-42,0.5,-8.5)
-    pill.BackgroundColor3=P.offColor; pill.BorderSizePixel=0
+    local pill = Instance.new("Frame", row)
+    pill.Size=UDim2.new(0,36,0,18); pill.Position=UDim2.new(1,-44,0.5,-9)
+    pill.BackgroundColor3=P.offPill; pill.BorderSizePixel=0
     Instance.new("UICorner",pill).CornerRadius=UDim.new(1,0)
 
-    local knob = Instance.new("Frame",pill)
-    knob.Size=UDim2.new(0,12,0,12); knob.Position=UDim2.new(0,2,0.5,-6)
-    knob.BackgroundColor3=P.muted; knob.BorderSizePixel=0
+    local knob = Instance.new("Frame", pill)
+    knob.Size=UDim2.new(0,13,0,13); knob.Position=UDim2.new(0,2,0.5,-6.5)
+    knob.BackgroundColor3=P.knobOff; knob.BorderSizePixel=0
     Instance.new("UICorner",knob).CornerRadius=UDim.new(1,0)
 
-    local hit = Instance.new("TextButton",row)
+    local hit = Instance.new("TextButton", row)
     hit.Size=UDim2.new(1,0,1,0); hit.BackgroundTransparency=1; hit.Text=""
 
     local on = false
     hit.MouseButton1Click:Connect(function()
-        on = not on; CFG[cfgKey] = on
-        TweenService:Create(pill,TweenInfo.new(0.14),{
-            BackgroundColor3 = on and P.onColor or P.offColor}):Play()
-        TweenService:Create(knob,TweenInfo.new(0.14),{
-            Position = on and UDim2.new(1,-14,0.5,-6) or UDim2.new(0,2,0.5,-6),
-            BackgroundColor3 = on and P.purpleGlow or P.muted}):Play()
+        on = not on
+        CFG[cfgKey] = on
+        TweenService:Create(pill,TweenInfo.new(0.13),{
+            BackgroundColor3=on and P.onPill or P.offPill}):Play()
+        TweenService:Create(knob,TweenInfo.new(0.13),{
+            Position=on and UDim2.new(1,-15,0.5,-6.5) or UDim2.new(0,2,0.5,-6.5),
+            BackgroundColor3=on and P.knobOn or P.knobOff}):Play()
+        TweenService:Create(lbl,TweenInfo.new(0.13),{
+            TextColor3=on and P.white or P.muted}):Play()
         if cb then cb(on) end
     end)
+    Reg(tabName, row)
 end
 
--- Slider builder
-local function Slider(page, label, cfgKey, minV, maxV, fmt, cb)
-    local f = Instance.new("Frame", page)
-    f.Size=UDim2.new(1,0,0,44); f.BackgroundColor3=P.rowBg
+local function Button(tabName, label, cb)
+    local row = Instance.new("TextButton", CONTENT)
+    row.Size=UDim2.new(1,0,0,32); row.BackgroundColor3=P.item
+    row.Text=label; row.Font=Enum.Font.GothamBold; row.TextSize=11
+    row.TextColor3=P.accent; row.AutoButtonColor=false
+    row.BorderSizePixel=0; row.LayoutOrder=O()
+    Corner(row,6); Stroke(row,P.accentDim,1)
+
+    row.MouseButton1Click:Connect(function()
+        TweenService:Create(row,TweenInfo.new(0.07),{BackgroundColor3=P.accentDim}):Play()
+        task.wait(0.1)
+        TweenService:Create(row,TweenInfo.new(0.15),{BackgroundColor3=P.item}):Play()
+        cb()
+    end)
+    row.MouseEnter:Connect(function()
+        TweenService:Create(row,TweenInfo.new(0.1),{BackgroundColor3=P.itemHover}):Play()
+    end)
+    row.MouseLeave:Connect(function()
+        TweenService:Create(row,TweenInfo.new(0.1),{BackgroundColor3=P.item}):Play()
+    end)
+    Reg(tabName, row)
+end
+
+local function Slider(tabName, label, cfgKey, minV, maxV, fmt, cb)
+    local f = Instance.new("Frame", CONTENT)
+    f.Size=UDim2.new(1,0,0,48); f.BackgroundColor3=P.item
     f.BorderSizePixel=0; f.LayoutOrder=O()
-    GlowCorner(f,6)
+    Corner(f,6)
 
-    local top = Instance.new("Frame",f)
-    top.Size=UDim2.new(1,0,0,20); top.BackgroundTransparency=1
+    local nl = Instance.new("TextLabel",f)
+    nl.Size=UDim2.new(1,-54,0,22); nl.Position=UDim2.new(0,10,0,2)
+    nl.BackgroundTransparency=1; nl.Text=label
+    nl.Font=Enum.Font.Gotham; nl.TextSize=10; nl.TextColor3=P.white
+    nl.TextXAlignment=Enum.TextXAlignment.Left
 
-    local namL = Instance.new("TextLabel",top)
-    namL.Size=UDim2.new(1,-50,1,0); namL.Position=UDim2.new(0,10,0,0)
-    namL.BackgroundTransparency=1; namL.Text=label
-    namL.Font=Enum.Font.Gotham; namL.TextSize=10
-    namL.TextColor3=P.white; namL.TextXAlignment=Enum.TextXAlignment.Left
-
-    local valL = Instance.new("TextLabel",top)
-    valL.Size=UDim2.new(0,46,1,0); valL.Position=UDim2.new(1,-50,0,0)
-    valL.BackgroundTransparency=1
-    local function fmtVal(v)
-        return fmt and string.format(fmt,v) or tostring(v)
-    end
-    valL.Text=fmtVal(CFG[cfgKey])
-    valL.Font=Enum.Font.GothamBold; valL.TextSize=10
-    valL.TextColor3=P.purpleGlow; valL.TextXAlignment=Enum.TextXAlignment.Right
+    local vl = Instance.new("TextLabel",f)
+    vl.Size=UDim2.new(0,48,0,22); vl.Position=UDim2.new(1,-52,0,2)
+    vl.BackgroundTransparency=1
+    local function fv(v) return fmt and string.format(fmt,v) or tostring(v) end
+    vl.Text=fv(CFG[cfgKey]); vl.Font=Enum.Font.GothamBold; vl.TextSize=10
+    vl.TextColor3=P.accentGlow; vl.TextXAlignment=Enum.TextXAlignment.Right
 
     local track = Instance.new("Frame",f)
-    track.Size=UDim2.new(1,-20,0,5); track.Position=UDim2.new(0,10,0,28)
-    track.BackgroundColor3=Color3.fromRGB(30,22,52); track.BorderSizePixel=0
-    Instance.new("UICorner",track).CornerRadius=UDim.new(1,0)
+    track.Size=UDim2.new(1,-20,0,5); track.Position=UDim2.new(0,10,0,34)
+    track.BackgroundColor3=Color3.fromRGB(25,18,48); track.BorderSizePixel=0
+    Corner(track,3)
 
     local fill = Instance.new("Frame",track)
     fill.Size=UDim2.new((CFG[cfgKey]-minV)/(maxV-minV),0,1,0)
-    fill.BackgroundColor3=P.purpleMid; fill.BorderSizePixel=0
-    Instance.new("UICorner",fill).CornerRadius=UDim.new(1,0)
+    fill.BackgroundColor3=P.accent; fill.BorderSizePixel=0; Corner(fill,3)
 
     local knob = Instance.new("Frame",track)
-    knob.Size=UDim2.new(0,13,0,13); knob.AnchorPoint=Vector2.new(0.5,0.5)
+    knob.Size=UDim2.new(0,14,0,14); knob.AnchorPoint=Vector2.new(0.5,0.5)
     knob.Position=UDim2.new((CFG[cfgKey]-minV)/(maxV-minV),0,0.5,0)
-    knob.BackgroundColor3=P.purpleGlow; knob.BorderSizePixel=0
-    Instance.new("UICorner",knob).CornerRadius=UDim.new(1,0)
-    AddStroke(knob,P.purpleDeep,1)
+    knob.BackgroundColor3=P.accentGlow; knob.BorderSizePixel=0
+    Corner(knob,7); Stroke(knob,P.accentDim,1)
 
     local dragging=false
     knob.InputBegan:Connect(function(i)
@@ -818,194 +977,325 @@ local function Slider(page, label, cfgKey, minV, maxV, fmt, cb)
     knob.InputEnded:Connect(function(i)
         if i.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end
     end)
-    UserInputService.InputChanged:Connect(function(i)
-        if dragging and i.UserInputType==Enum.UserInputType.MouseMovement then
-            local rel=math.clamp(
-                (i.Position.X-track.AbsolutePosition.X)/track.AbsoluteSize.X,0,1)
+    -- Also allow dragging on the track itself
+    track.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 then
+            dragging=true
+            local rel=math.clamp((i.Position.X-track.AbsolutePosition.X)/track.AbsoluteSize.X,0,1)
             local val=math.floor(minV+rel*(maxV-minV))
-            CFG[cfgKey]=val
-            fill.Size=UDim2.new(rel,0,1,0)
-            knob.Position=UDim2.new(rel,0,0.5,0)
-            valL.Text=fmtVal(val)
+            CFG[cfgKey]=val; fill.Size=UDim2.new(rel,0,1,0)
+            knob.Position=UDim2.new(rel,0,0.5,0); vl.Text=fv(val)
             if cb then cb(val) end
         end
     end)
+    UserInputService.InputChanged:Connect(function(i)
+        if dragging and i.UserInputType==Enum.UserInputType.MouseMovement then
+            local rel=math.clamp((i.Position.X-track.AbsolutePosition.X)/track.AbsoluteSize.X,0,1)
+            local val=math.floor(minV+rel*(maxV-minV))
+            CFG[cfgKey]=val; fill.Size=UDim2.new(rel,0,1,0)
+            knob.Position=UDim2.new(rel,0,0.5,0); vl.Text=fv(val)
+            if cb then cb(val) end
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end
+    end)
+    Reg(tabName, f)
 end
 
--- Dropdown (two-option picker)
-local function Dropdown(page, label, cfgKey, opts, cb)
-    local f = Instance.new("Frame",page)
-    f.Size=UDim2.new(1,0,0,30); f.BackgroundColor3=P.rowBg
-    f.BorderSizePixel=0; f.LayoutOrder=O()
-    GlowCorner(f,6)
+local function Dropdown(tabName, label, cfgKey, options, cb)
+    local f = Instance.new("Frame", CONTENT)
+    f.Size=UDim2.new(1,0,0,32); f.BackgroundColor3=P.item
+    f.BorderSizePixel=0; f.LayoutOrder=O(); f.ClipsDescendants=true
+    Corner(f,6)
 
     local lbl = Instance.new("TextLabel",f)
-    lbl.Size=UDim2.new(0.5,-4,1,0); lbl.Position=UDim2.new(0,10,0,0)
+    lbl.Size=UDim2.new(0.45,0,0,32); lbl.Position=UDim2.new(0,10,0,0)
     lbl.BackgroundTransparency=1; lbl.Text=label
     lbl.Font=Enum.Font.Gotham; lbl.TextSize=10
     lbl.TextColor3=P.white; lbl.TextXAlignment=Enum.TextXAlignment.Left
 
-    local selIdx = 1
-    for i,o in ipairs(opts) do if o==CFG[cfgKey] then selIdx=i end end
+    local selBtn = Instance.new("TextButton",f)
+    selBtn.Size=UDim2.new(0,110,0,24); selBtn.Position=UDim2.new(1,-118,0.5,-12)
+    selBtn.BackgroundColor3=P.accentDim; selBtn.Text=CFG[cfgKey] or options[1]
+    selBtn.Font=Enum.Font.GothamBold; selBtn.TextSize=9
+    selBtn.TextColor3=P.white; selBtn.BorderSizePixel=0
+    Corner(selBtn,4); Stroke(selBtn,P.accent,1)
 
-    local optBtns = {}
-    local totalW = (1/(#opts))
-    for i, opt in ipairs(opts) do
-        local btn = Instance.new("TextButton",f)
-        btn.Size=UDim2.new(0, 62, 0, 20)
-        btn.Position=UDim2.new(1, -10 - (62*(#opts-i+1)) + (4*(#opts-i)), 0.5, -10)
-        btn.BackgroundColor3= i==selIdx and P.purpleDeep or Color3.fromRGB(18,12,35)
-        btn.BackgroundTransparency= i==selIdx and 0 or 0
-        btn.Text=opt; btn.Font=Enum.Font.GothamBold; btn.TextSize=9
-        btn.TextColor3= i==selIdx and P.white or P.muted
-        btn.BorderSizePixel=0
-        GlowCorner(btn,4)
-        optBtns[i]=btn
-        btn.MouseButton1Click:Connect(function()
-            selIdx=i; CFG[cfgKey]=opt
-            for j,b in ipairs(optBtns) do
-                TweenService:Create(b,TweenInfo.new(0.1),{
-                    BackgroundColor3=j==i and P.purpleDeep or Color3.fromRGB(18,12,35),
-                    BackgroundTransparency=0}):Play()
-                b.TextColor3=j==i and P.white or P.muted
-            end
+    -- Dropdown list
+    local dropList = Instance.new("Frame",f)
+    dropList.Size=UDim2.new(1,-16,0, #options*28+4)
+    dropList.Position=UDim2.new(0,8,0,34)
+    dropList.BackgroundColor3=P.glass; dropList.BorderSizePixel=0; dropList.Visible=false
+    Corner(dropList,5); Stroke(dropList,P.accentDim,1)
+    List(dropList,nil,2); Pad(dropList,4,4,3,3)
+
+    local open=false
+    selBtn.MouseButton1Click:Connect(function()
+        open=not open
+        dropList.Visible=open
+        TweenService:Create(f,TweenInfo.new(0.15),{
+            Size=open and UDim2.new(1,0,0,34+#options*28+10) or UDim2.new(1,0,0,32)}):Play()
+    end)
+
+    for _, opt in ipairs(options) do
+        local ob = Instance.new("TextButton",dropList)
+        ob.Size=UDim2.new(1,0,0,26); ob.BackgroundColor3=P.item
+        ob.Text=opt; ob.Font=Enum.Font.Gotham; ob.TextSize=10
+        ob.TextColor3=P.muted; ob.BorderSizePixel=0
+        Corner(ob,4)
+        ob.MouseButton1Click:Connect(function()
+            CFG[cfgKey]=opt; selBtn.Text=opt
+            open=false; dropList.Visible=false
+            TweenService:Create(f,TweenInfo.new(0.15),{Size=UDim2.new(1,0,0,32)}):Play()
             if cb then cb(opt) end
         end)
+        ob.MouseEnter:Connect(function()
+            TweenService:Create(ob,TweenInfo.new(0.08),{BackgroundColor3=P.itemHover}):Play()
+            ob.TextColor3=P.white
+        end)
+        ob.MouseLeave:Connect(function()
+            TweenService:Create(ob,TweenInfo.new(0.08),{BackgroundColor3=P.item}):Play()
+            ob.TextColor3=P.muted
+        end)
     end
+    Reg(tabName, f)
 end
 
--- ── COMBAT tab ─────────────────────────────────────────────────────────
-local CP = tabPages[1]
-Section(CP, "⚡  Aimbot")
-Toggle(CP,  "Auto Target Nearest",  "AutoTarget")
-Toggle(CP,  "Aimbot Gun",           "AimbotGun")
-Toggle(CP,  "Aimbot Skill",         "AimbotSkill")
-Toggle(CP,  "Silent Aim",           "SilentAim")
-Toggle(CP,  "CamLock",              "CamLock")
-Toggle(CP,  "Fast Attack  (M1)",    "FastAttack")
+-- ── Player list dropdown (QuixHub refresh logic) ──────────────────────────
+local playerListDropdown = nil
+local function BuildPlayerList(tabName)
+    local f = Instance.new("Frame", CONTENT)
+    f.Size=UDim2.new(1,0,0,32); f.BackgroundColor3=P.item
+    f.BorderSizePixel=0; f.LayoutOrder=O(); f.ClipsDescendants=true
+    Corner(f,6)
 
-Section(CP, "👁  ESP")
-Toggle(CP,  "Player ESP",           "ESPPlayer")
+    local lbl = Instance.new("TextLabel",f)
+    lbl.Size=UDim2.new(0.45,0,0,32); lbl.Position=UDim2.new(0,10,0,0)
+    lbl.BackgroundTransparency=1; lbl.Text="Select Player"
+    lbl.Font=Enum.Font.Gotham; lbl.TextSize=10
+    lbl.TextColor3=P.white; lbl.TextXAlignment=Enum.TextXAlignment.Left
 
-Section(CP, "🥋  Combat")
-Toggle(CP,  "Auto Haki (Buso)",     "AutoHaki")
-Toggle(CP,  "Auto V3",              "AutoV3")
-Toggle(CP,  "Auto V4",              "AutoV4")
+    local selBtn = Instance.new("TextButton",f)
+    selBtn.Size=UDim2.new(0,110,0,24); selBtn.Position=UDim2.new(1,-118,0.5,-12)
+    selBtn.BackgroundColor3=P.accentDim; selBtn.Text="-- Pick --"
+    selBtn.Font=Enum.Font.GothamBold; selBtn.TextSize=9
+    selBtn.TextColor3=P.white; selBtn.BorderSizePixel=0
+    Corner(selBtn,4); Stroke(selBtn,P.accent,1)
 
--- ── UTIL tab ──────────────────────────────────────────────────────────
-local UP = tabPages[2]
-Section(UP, "🛡  Movement")
-Toggle(UP,  "Walk on Water",        "WalkWater")
-Toggle(UP,  "Speed Hack",           "SpeedHack")
+    local scroll = Instance.new("ScrollingFrame",f)
+    scroll.Size=UDim2.new(1,-16,0,120); scroll.Position=UDim2.new(0,8,0,34)
+    scroll.BackgroundColor3=P.glass; scroll.BorderSizePixel=0; scroll.Visible=false
+    scroll.ScrollBarThickness=2; scroll.ScrollBarImageColor3=P.scrollBar
+    scroll.AutomaticCanvasSize=Enum.AutomaticSize.Y; scroll.CanvasSize=UDim2.new(0,0,0,0)
+    Corner(scroll,5); Stroke(scroll,P.accentDim,1)
+    List(scroll,nil,2); Pad(scroll,4,4,3,3)
 
-Section(UP, "🛡  Safety")
-Toggle(UP,  "Safe Mode",            "SafeMode")
-Toggle(UP,  "High Performance",     "HighPerf", function(on)
-    if on then spawn(function() pcall(ApplyHighPerf) end) end
+    local open=false
+    selBtn.MouseButton1Click:Connect(function()
+        open=not open; scroll.Visible=open
+        TweenService:Create(f,TweenInfo.new(0.15),{
+            Size=open and UDim2.new(1,0,0,160) or UDim2.new(1,0,0,32)}):Play()
+    end)
+
+    -- Refresh function
+    local function Refresh()
+        for _, c in ipairs(scroll:GetChildren()) do
+            if c:IsA("TextButton") then c:Destroy() end
+        end
+        local found = false
+        for _, v in ipairs(Players:GetPlayers()) do
+            if v ~= LP then
+                found = true
+                local ob = Instance.new("TextButton",scroll)
+                ob.Size=UDim2.new(1,0,0,26); ob.BackgroundColor3=P.item
+                ob.Text=v.Name; ob.Font=Enum.Font.Gotham; ob.TextSize=10
+                ob.TextColor3=P.muted; ob.BorderSizePixel=0
+                Corner(ob,4)
+                ob.MouseButton1Click:Connect(function()
+                    CFG.SpecificPlayer=v.Name; selBtn.Text=v.Name
+                    open=false; scroll.Visible=false
+                    TweenService:Create(f,TweenInfo.new(0.15),{Size=UDim2.new(1,0,0,32)}):Play()
+                end)
+            end
+        end
+        if not found then
+            local ob=Instance.new("TextButton",scroll)
+            ob.Size=UDim2.new(1,0,0,26); ob.BackgroundColor3=P.item
+            ob.Text="No Players"; ob.Font=Enum.Font.Gotham; ob.TextSize=10
+            ob.TextColor3=P.muted; ob.BorderSizePixel=0; Corner(ob,4)
+        end
+    end
+
+    playerListDropdown = Refresh
+    Refresh()
+    Reg(tabName, f)
+    return Refresh
+end
+
+-- ════════════════════════════════════════════════════════
+--  BUILD TABS
+-- ════════════════════════════════════════════════════════
+AddTab("Combat",   "⚡")
+AddTab("Movement", "🏃")
+AddTab("Visuals",  "👁")
+AddTab("Misc",     "⚙")
+
+-- ── COMBAT ────────────────────────────────────────────────────────────────
+Section("Combat", "Aimbot")
+Toggle("Combat",   "Aimbot Gun",          "AimbotGun")
+Toggle("Combat",   "Aimbot Skill",        "AimbotSkill")
+Toggle("Combat",   "Silent Aim",          "SilentAim")
+Toggle("Combat",   "CamLock",             "CamLock")
+
+Section("Combat", "Attack")
+Toggle("Combat",   "Fast Attack  (M1)",   "FastAttack")
+Toggle("Combat",   "Auto Haki (Buso)",    "AutoHaki")
+Toggle("Combat",   "Auto V3",             "AutoV3")
+Toggle("Combat",   "Auto V4",             "AutoV4")
+
+Section("Combat", "Target")
+Dropdown("Combat", "Target Mode",   "TargetMode",   {"Nearest Enemy","Specific Player"}, function(v)
+    if v == "Specific Player" and playerListDropdown then playerListDropdown() end
+end)
+Dropdown("Combat", "Aim At",        "AimbotTarget", {"HRP","Head"})
+BuildPlayerList("Combat")
+Button("Combat", "↻  Refresh Player List", function()
+    if playerListDropdown then playerListDropdown() end
+    Notify("Players", "List refreshed!", 1)
 end)
 
--- ── SETTINGS tab ──────────────────────────────────────────────────────
-local SP2 = tabPages[3]
-Section(SP2, "🎯  Aimbot")
-Dropdown(SP2, "Target Part",  "AimbotTarget", {"HRP","Head"})
-Slider(SP2,   "ESP Range",    "ESPRange",     50, 1000, "%dm")
-Slider(SP2,   "Atk Delay",    "FastAtkDelay", 0,  1,   "%.2fs")
+Section("Combat", "Special")
+Button("Combat", "❄  Ice TP & Kill (600m)", IceTPKill)
 
-Section(SP2, "🏃  Movement")
-Slider(SP2,   "Walk Speed",   "WalkSpeed",    16, 250, "%d")
-Slider(SP2,   "Jump Power",   "JumpPower",    50, 500, "%d")
+-- ── MOVEMENT ──────────────────────────────────────────────────────────────
+Section("Movement", "Stats")
+Toggle("Movement", "Speed Hack",      "SpeedHack")
+Toggle("Movement", "Walk on Water",   "WalkWater")
+Toggle("Movement", "NoClip (Walls)",  "NoClip")
+Toggle("Movement", "Safe Mode",       "SafeMode")
 
-Section(SP2, "🛡  Thresholds")
-Slider(SP2,   "Safe HP %",    "SafeHPThresh", 5,  80,  "%d%%")
+Slider("Movement", "Walk Speed",      "WalkSpeed",     16, 350, "%d")
+Slider("Movement", "Jump Power",      "JumpPower",     50, 500, "%d")
+Slider("Movement", "Safe HP Thresh",  "SafeHPThresh",  5,  80,  "%d%%")
 
--- ── Minimise ──────────────────────────────────────────────────────────
+Button("Movement", "🖱  Get Click-TP Tool", GiveTPTool)
+
+-- ── VISUALS ───────────────────────────────────────────────────────────────
+Section("Visuals", "ESP")
+Toggle("Visuals",  "Player ESP",      "ESPPlayer")
+Slider("Visuals",  "ESP Range",       "ESPRange",      50, 1500, "%dm")
+
+Section("Visuals", "Performance")
+Toggle("Visuals",  "High Performance","HighPerf", function(on)
+    if on then spawn(function() pcall(ApplyHighPerf) end) end
+end)
+Button("Visuals", "⚡  Apply FPS Boost Now", function()
+    spawn(function() pcall(ApplyHighPerf) end)
+end)
+
+-- ── MISC ──────────────────────────────────────────────────────────────────
+Section("Misc", "Advanced")
+Slider("Misc", "Fast Atk Delay",  "FastAtkDelay", 0, 1,   "%.2fs")
+Toggle("Misc", "Auto V3",         "AutoV3")
+Toggle("Misc", "Auto V4",         "AutoV4")
+
+Section("Misc", "Info")
+local infoLbl = Instance.new("TextLabel", CONTENT)
+infoLbl.Size=UDim2.new(1,0,0,28); infoLbl.BackgroundColor3=P.item
+infoLbl.Font=Enum.Font.Gotham; infoLbl.TextSize=9
+infoLbl.TextColor3=P.muted; infoLbl.TextXAlignment=Enum.TextXAlignment.Center
+infoLbl.Text="github.com/rhoscript/BUNNI_R  ·  v3.0"
+infoLbl.BorderSizePixel=0; infoLbl.LayoutOrder=O()
+Corner(infoLbl,6)
+Reg("Misc", infoLbl)
+
+-- Show Combat tab by default
+ShowTab("Combat")
+
+-- ── Minimise ──────────────────────────────────────────────────────────────
 local mini = false
 MINBTN.MouseButton1Click:Connect(function()
     mini = not mini
-    local newSize = mini and UDim2.new(0,250,0,46) or UDim2.new(0,250,0,420)
-    TweenService:Create(WIN,TweenInfo.new(0.2,Enum.EasingStyle.Quart),{Size=newSize}):Play()
+    TweenService:Create(WIN, TweenInfo.new(0.18,Enum.EasingStyle.Quart), {
+        Size = mini and UDim2.new(0,560,0,38) or UDim2.new(0,560,0,340)
+    }):Play()
     MINBTN.Text = mini and "+" or "−"
 end)
 
 -- ════════════════════════════════════════════════════════════════════════
---  FLOATING JUMP BUTTON  (top-right, draggable circle)
+--  FLOATING BUTTON  (open/close toggle, top-left)
+-- ════════════════════════════════════════════════════════════════════════
+local FLOATBTN = Instance.new("ImageButton", gui)
+FLOATBTN.Size     = UDim2.new(0,54,0,54)
+FLOATBTN.Position = UDim2.new(0.06, 0, 0.18, 0)
+FLOATBTN.BackgroundColor3 = Color3.fromRGB(0,0,0)
+FLOATBTN.Image    = ""   -- replace with rbxassetid if you have the bunny asset
+FLOATBTN.Active   = true
+Corner(FLOATBTN, 27)
+Stroke(FLOATBTN, P.accent, 2)
+Draggable(FLOATBTN, FLOATBTN)
+
+-- Bunny emoji fallback
+local fbLbl = Instance.new("TextLabel", FLOATBTN)
+fbLbl.Size=UDim2.new(1,0,1,0); fbLbl.BackgroundTransparency=1
+fbLbl.Text="🐰"; fbLbl.TextSize=26; fbLbl.Font=Enum.Font.GothamBold
+
+local guiVisible = true
+FLOATBTN.MouseButton1Click:Connect(function()
+    guiVisible = not guiVisible
+    WIN.Visible = guiVisible
+    TweenService:Create(FLOATBTN,TweenInfo.new(0.12),{
+        BackgroundColor3=guiVisible and Color3.fromRGB(0,0,0) or P.accentDim}):Play()
+end)
+
+-- ════════════════════════════════════════════════════════════════════════
+--  JUMP CIRCLE BUTTON  (top-right, draggable)
 -- ════════════════════════════════════════════════════════════════════════
 local JWIN = Instance.new("Frame", gui)
-JWIN.Size = UDim2.new(0, 58, 0, 58)
-JWIN.Position = UDim2.new(1, -70, 0, 10)
+JWIN.Size     = UDim2.new(0,58,0,58)
+JWIN.Position = UDim2.new(1,-72,0,10)
 JWIN.BackgroundColor3 = P.glass
-JWIN.BorderSizePixel = 0
-GlowCorner(JWIN, 29)  -- full circle
-AddStroke(JWIN, P.purpleMid, 1.5)
+JWIN.BorderSizePixel  = 0
+Corner(JWIN, 29)
+Stroke(JWIN, P.accent, 1.5)
 Draggable(JWIN, JWIN)
 
--- Inner glow ring
-local innerRing = Instance.new("Frame", JWIN)
-innerRing.Size = UDim2.new(0, 44, 0, 44)
-innerRing.Position = UDim2.new(0.5, -22, 0.5, -22)
-innerRing.BackgroundTransparency = 1
-innerRing.BorderSizePixel = 0
-GlowCorner(innerRing, 22)
-AddStroke(innerRing, P.purpleDeep, 1)
-
 local jIcon = Instance.new("TextLabel", JWIN)
-jIcon.Size = UDim2.new(1, 0, 0.6, 0)
-jIcon.Position = UDim2.new(0, 0, 0.05, 0)
-jIcon.BackgroundTransparency = 1
-jIcon.Text = "↑"
-jIcon.Font = Enum.Font.GothamBold
-jIcon.TextSize = 24
-jIcon.TextColor3 = P.purpleGlow
+jIcon.Size=UDim2.new(1,0,0.6,0); jIcon.Position=UDim2.new(0,0,0.05,0)
+jIcon.BackgroundTransparency=1; jIcon.Text="↑"
+jIcon.Font=Enum.Font.GothamBold; jIcon.TextSize=26; jIcon.TextColor3=P.accentGlow
 
 local jTxt = Instance.new("TextLabel", JWIN)
-jTxt.Size = UDim2.new(1, 0, 0, 14)
-jTxt.Position = UDim2.new(0, 0, 1, -15)
-jTxt.BackgroundTransparency = 1
-jTxt.Text = "JUMP"
-jTxt.Font = Enum.Font.GothamBold
-jTxt.TextSize = 8
-jTxt.TextColor3 = P.muted
+jTxt.Size=UDim2.new(1,0,0,13); jTxt.Position=UDim2.new(0,0,1,-14)
+jTxt.BackgroundTransparency=1; jTxt.Text="JUMP"
+jTxt.Font=Enum.Font.GothamBold; jTxt.TextSize=8; jTxt.TextColor3=P.muted
 
 local jBtn = Instance.new("TextButton", JWIN)
-jBtn.Size = UDim2.new(1,0,1,0); jBtn.BackgroundTransparency=1; jBtn.Text=""
+jBtn.Size=UDim2.new(1,0,1,0); jBtn.BackgroundTransparency=1; jBtn.Text=""
 
 jBtn.MouseButton1Click:Connect(function()
     pcall(function()
         local char = LP.Character
         local hum  = char and char:FindFirstChild("Humanoid")
-        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-        if hum and hrp then
+        if hum then
             local orig = hum.JumpPower
             hum.JumpPower = CFG.JumpPower
             hum.Jump = true
-            task.wait(0.15)
+            task.wait(0.2)
             hum.JumpPower = orig
         end
     end)
-    -- Pulse animation on click
-    TweenService:Create(JWIN, TweenInfo.new(0.08),
-        {BackgroundColor3=P.purpleDeep}):Play()
-    task.wait(0.12)
-    TweenService:Create(JWIN, TweenInfo.new(0.25),
-        {BackgroundColor3=P.glass}):Play()
+    TweenService:Create(JWIN,TweenInfo.new(0.08),{BackgroundColor3=P.accentDim}):Play()
+    task.wait(0.14)
+    TweenService:Create(JWIN,TweenInfo.new(0.2),{BackgroundColor3=P.glass}):Play()
 end)
 
--- Hover glow effect
 JWIN.MouseEnter:Connect(function()
-    TweenService:Create(JWIN,TweenInfo.new(0.15),
-        {BackgroundColor3=Color3.fromRGB(22,14,44)}):Play()
+    TweenService:Create(JWIN,TweenInfo.new(0.12),{BackgroundColor3=Color3.fromRGB(20,13,42)}):Play()
 end)
 JWIN.MouseLeave:Connect(function()
-    TweenService:Create(JWIN,TweenInfo.new(0.15),
-        {BackgroundColor3=P.glass}):Play()
+    TweenService:Create(JWIN,TweenInfo.new(0.12),{BackgroundColor3=P.glass}):Play()
 end)
 
--- Footer label inside WIN (very bottom)
-local footer = Instance.new("TextLabel", WIN)
-footer.Size = UDim2.new(1,0,0,14)
-footer.Position = UDim2.new(0,0,1,-14)
-footer.BackgroundTransparency = 1
-footer.Text = "github.com/rhoscript/BUNNI_R"
-footer.Font = Enum.Font.Gotham; footer.TextSize = 8
-footer.TextColor3 = Color3.fromRGB(35,28,55)
-footer.TextXAlignment = Enum.TextXAlignment.Center
+Notify("BUNNI_R", "Matsune PVP v3.0 Loaded!", 3)
